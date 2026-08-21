@@ -1,8 +1,10 @@
 #!/data/data/com.termux/files/usr/bin/bash
+
 set -euo pipefail
 
 REPO="Ribco/dinex"
 INSTALL_DIR="$HOME/.local/bin"
+BASE="https://github.com/${REPO}/releases/latest/download"
 
 echo "=== Dinex Termux Installer ==="
 
@@ -13,26 +15,52 @@ command -v curl >/dev/null || {
 }
 
 ARCH="$(uname -m)"
+
 case "$ARCH" in
-    aarch64|arm64) ASSET_ARCH="arm64" ;;
-    x86_64|amd64) ASSET_ARCH="amd64" ;;
-    *) echo "ERROR: Unsupported architecture: $ARCH"; exit 1 ;;
+    aarch64|arm64)
+        ASSET_ARCH="arm64"
+        ;;
+    x86_64|amd64)
+        ASSET_ARCH="amd64"
+        ;;
+    *)
+        echo "ERROR: Unsupported architecture: $ARCH"
+        exit 1
+        ;;
 esac
 
 mkdir -p "$INSTALL_DIR"
 
-BASE="https://github.com/${REPO}/releases/latest/download"
-
 echo "Architecture: $ASSET_ARCH"
 echo "Installing to: $INSTALL_DIR"
+echo
 
-curl -fL "$BASE/dinex-panel-linux-${ASSET_ARCH}" \
-    -o "$INSTALL_DIR/dinex-panel"
+download() {
+    local name="$1"
+    local output="$2"
 
-curl -fL "$BASE/dinex-agent-linux-${ASSET_ARCH}" \
-    -o "$INSTALL_DIR/dinex-agent"
+    echo "Downloading $name..."
+
+    curl -fL \
+        --retry 10 \
+        --retry-delay 3 \
+        --retry-max-time 300 \
+        --connect-timeout 30 \
+        --continue-at - \
+        "$BASE/$name" \
+        -o "$output"
+}
+
+download "dinex-panel-linux-${ASSET_ARCH}" "$INSTALL_DIR/dinex-panel"
+download "dinex-agent-linux-${ASSET_ARCH}" "$INSTALL_DIR/dinex-agent"
 
 chmod +x "$INSTALL_DIR/dinex-panel" "$INSTALL_DIR/dinex-agent"
+
+echo
+echo "Dinex installed successfully!"
+echo
+echo "Panel: $INSTALL_DIR/dinex-panel"
+echo "Agent: $INSTALL_DIR/dinex-agent"
 
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
     echo
@@ -41,6 +69,4 @@ if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
 fi
 
 echo
-echo "Dinex installed successfully!"
-echo "Panel: $INSTALL_DIR/dinex-panel"
-echo "Agent: $INSTALL_DIR/dinex-agent"
+echo "Done!"
