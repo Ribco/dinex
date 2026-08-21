@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width,initial-scale=1">
+	<title>Dinex — Login</title>
+
+	<style>
+		* {
+			box-sizing: border-box;
+		}
+
+		body {
+			margin: 0;
+			min-height: 100vh;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			background: #0b0d12;
+			color: #f5f7fa;
+			font-family: system-ui, sans-serif;
+		}
+
+		.card {
+			width: min(420px, calc(100% - 32px));
+			padding: 32px;
+			border: 1px solid #242936;
+			border-radius: 18px;
+			background: #11141b;
+			box-shadow: 0 20px 60px #0008;
+		}
+
+		h1 {
+			margin: 0 0 8px;
+		}
+
+		p {
+			color: #8f98a8;
+		}
+
+		input {
+			width: 100%;
+			padding: 13px;
+			margin-top: 8px;
+			margin-bottom: 16px;
+			border: 1px solid #303746;
+			border-radius: 10px;
+			background: #0b0d12;
+			color: white;
+			outline: none;
+		}
+
+		button {
+			width: 100%;
+			padding: 13px;
+			border: 0;
+			border-radius: 10px;
+			background: #7c5cff;
+			color: white;
+			font-weight: 700;
+			cursor: pointer;
+		}
+
+		.error {
+			color: #ff6b6b;
+		}
+	</style>
+    <link rel="stylesheet" href="/static/css/dinex.css">
+</head>
+
+<body>
+<div id="dinex-loader">
+    <div class="dinex-loader-logo">♥</div>
+    <div class="dinex-loader-name">Dinex</div>
+    <div class="dinex-loader-spinner"></div>
+</div>
+
+<script src="/static/js/dinex.js"></script>
+	<div class="card">
+		<h1>🦖 Dinex</h1>
+		<p>Sign in to your hosting panel.</p>
+
+		{{if .Error}}
+		<div class="error">{{.Error}}</div>
+		{{end}}
+
+		<form method="POST" action="/login">
+			<label>Username</label>
+			<input
+				name="username"
+				autocomplete="username"
+				required
+			>
+
+			<label>Password</label>
+			<input
+				type="password"
+				name="password"
+				autocomplete="current-password"
+				required
+			>
+
+			<button type="submit">Sign in</button>
+		</form>
+	</div>
+</body>
+</html>

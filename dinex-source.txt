@@ -1,0 +1,2739 @@
+package api
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"strings"
+
+	"github.com/Ribco/dinex/agent/internal/config"
+	"github.com/Ribco/dinex/agent/internal/manager"
+)
+
+type Server struct {
+	cfg *config.Config
+	mgr *manager.Manager
+}
+
+func New(cfg *config.Config, mgr *manager.Manager) *Server {
+	return &Server{
+		cfg: cfg,
+		mgr: mgr,
+	}
+}
+
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/health", s.health)
+	mux.HandleFunc("/api/v1/status", s.status)
+	mux.HandleFunc("/api/v1/servers", s.servers)
+	mux.HandleFunc("/api/v1/servers/", s.server)
+
+	return s.auth(mux)
+}
+
+func (s *Server) health(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status":  "ok",
+		"service": "dinex-agent",
+		"version": s.cfg.Version,
+	})
+}
+
+func (s *Server) status(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{
+		"node_id":   s.cfg.NodeID,
+		"node_name": s.cfg.NodeName,
+		"version":   s.cfg.Version,
+	})
+}
+
+func (s *Server) servers(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, s.mgr.List())
+
+	case http.MethodPost:
+		var server manager.Server
+
+		if err := json.NewDecoder(r.Body).Decode(&server); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+
+		if err := s.mgr.Create(&server); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		writeJSON(w, http.StatusCreated, server)
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) server(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(
+		r.URL.Path,
+		"/api/v1/servers/",
+	)
+
+	parts := strings.Split(
+		strings.Trim(path, "/"),
+		"/",
+	)
+
+	if len(parts) == 0 || parts[0] == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	id := parts[0]
+
+	if len(parts) == 1 && r.Method == http.MethodGet {
+		status, err := s.mgr.Status(id)
+
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, status)
+		return
+	}
+
+	if len(parts) == 2 && parts[1] == "logs" && r.Method == http.MethodGet {
+		lines, err := s.mgr.Logs(id)
+
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"lines": lines,
+		})
+
+		return
+	}
+
+	if len(parts) == 2 && r.Method == http.MethodPost {
+		var err error
+
+		switch parts[1] {
+		case "start":
+			err = s.mgr.Start(id)
+
+		case "stop":
+			err = s.mgr.Stop(id)
+
+		case "kill":
+			err = s.mgr.Kill(id)
+
+		default:
+			http.NotFound(w, r)
+			return
+		}
+
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status": "ok",
+		})
+
+		return
+	}
+
+	// Files API
+	if len(parts) == 2 && parts[1] == "files" && r.Method == http.MethodGet {
+		path := r.URL.Query().Get("path")
+
+		files, err := s.mgr.Files(id, path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"path":  path,
+			"files": files,
+		})
+		return
+	}
+
+	if len(parts) == 2 && parts[1] == "file" && r.Method == http.MethodGet {
+		path := r.URL.Query().Get("path")
+
+		data, err := s.mgr.ReadFile(id, path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write(data)
+		return
+	}
+
+	if len(parts) == 2 && parts[1] == "file" && r.Method == http.MethodPut {
+		path := r.URL.Query().Get("path")
+
+		data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 50<<20))
+		if err != nil {
+			http.Error(w, "failed to read file", http.StatusBadRequest)
+			return
+		}
+
+		if err := s.mgr.WriteFile(id, path, data); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+
+	if len(parts) == 2 && parts[1] == "folder" && r.Method == http.MethodPost {
+		path := r.URL.Query().Get("path")
+
+		if err := s.mgr.CreateFolder(id, path); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		writeJSON(w, http.StatusCreated, map[string]string{"status": "ok"})
+		return
+	}
+
+	if len(parts) == 2 && parts[1] == "files" && r.Method == http.MethodDelete {
+		path := r.URL.Query().Get("path")
+
+		if err := s.mgr.DeleteFile(id, path); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+
+	if len(parts) == 2 && parts[1] == "rename" && r.Method == http.MethodPost {
+		var payload struct {
+			OldPath string `json:"old_path"`
+			NewPath string `json:"new_path"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+
+		if err := s.mgr.RenameFile(id, payload.OldPath, payload.NewPath); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+
+	if len(parts) == 2 && parts[1] == "download" && r.Method == http.MethodGet {
+		path := r.URL.Query().Get("path")
+
+		filePath, err := s.mgr.FilePath(id, path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		info, err := s.mgr.FileInfo(id, path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+
+		if info.IsDir() {
+			http.Error(w, "path is a directory", http.StatusBadRequest)
+			return
+		}
+
+		http.ServeFile(w, r, filePath)
+		return
+	}
+
+	http.NotFound(w, r)
+}
+func (s *Server) auth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		if s.cfg.AuthToken == "" {
+			http.Error(
+				w,
+				"agent authentication is not configured",
+				http.StatusUnauthorized,
+			)
+			return
+		}
+
+		token := strings.TrimPrefix(
+			r.Header.Get("Authorization"),
+			"Bearer ",
+		)
+
+		if token != s.cfg.AuthToken {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+
+	_ = json.NewEncoder(w).Encode(value)
+}
+package manager
+
+import (
+	"bufio"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/Ribco/dinex/agent/internal/config"
+)
+
+type process struct {
+	cmd       *exec.Cmd
+	startedAt time.Time
+	state     string
+	exitCode  *int
+}
+
+type Manager struct {
+	cfg       *config.Config
+	mu        sync.RWMutex
+	servers   map[string]*Server
+	processes map[string]*process
+	logs      map[string][]string
+	logMu     sync.RWMutex
+}
+
+func New(cfg *config.Config) *Manager {
+	m := &Manager{
+		cfg:       cfg,
+		servers:   make(map[string]*Server),
+		processes: make(map[string]*process),
+		logs:      make(map[string][]string),
+	}
+
+	serversDir := filepath.Join(cfg.DataDir, "servers")
+
+	if err := os.MkdirAll(serversDir, 0755); err != nil {
+		return m
+	}
+
+	if err := m.loadServers(); err != nil {
+		// Don't prevent the Agent from starting because one server
+		// configuration is broken.
+	}
+
+	return m
+}
+
+func (m *Manager) loadServers() error {
+	root := filepath.Join(m.cfg.DataDir, "servers")
+
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		serverFile := filepath.Join(
+			root,
+			entry.Name(),
+			"server.json",
+		)
+
+		data, err := os.ReadFile(serverFile)
+		if err != nil {
+			continue
+		}
+
+		var server Server
+
+		if err := json.Unmarshal(data, &server); err != nil {
+			continue
+		}
+
+		if server.ID == "" {
+			continue
+		}
+
+		if server.Directory == "" {
+			server.Directory = filepath.Join(
+				root,
+				server.ID,
+			)
+		}
+
+		if server.Env == nil {
+			server.Env = make(map[string]string)
+		}
+
+		m.servers[server.ID] = &server
+	}
+
+	return nil
+}
+
+func (m *Manager) saveServer(server *Server) error {
+	directory := filepath.Join(
+		m.cfg.DataDir,
+		"servers",
+		server.ID,
+	)
+
+	if err := os.MkdirAll(directory, 0750); err != nil {
+		return err
+	}
+
+	data, err := json.MarshalIndent(
+		server,
+		"",
+		"  ",
+	)
+
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(
+		filepath.Join(directory, "server.json"),
+		append(data, '\n'),
+		0600,
+	)
+}
+
+func (m *Manager) Create(s *Server) error {
+	if s.ID == "" {
+		return errors.New("server ID is required")
+	}
+
+	if s.Name == "" {
+		return errors.New("server name is required")
+	}
+
+	if s.Startup == "" {
+		return errors.New("startup command is required")
+	}
+
+	if strings.ContainsAny(s.ID, `/\`) ||
+		s.ID == "." ||
+		s.ID == ".." {
+		return errors.New("invalid server ID")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, exists := m.servers[s.ID]; exists {
+		return errors.New("server already exists")
+	}
+
+	if s.Directory == "" {
+		s.Directory = filepath.Join(
+			m.cfg.DataDir,
+			"servers",
+			s.ID,
+		)
+	}
+
+	if err := os.MkdirAll(s.Directory, 0750); err != nil {
+		return err
+	}
+
+	if s.Env == nil {
+		s.Env = make(map[string]string)
+	}
+
+	s.CreatedAt = time.Now().UTC()
+
+	if err := m.saveServer(s); err != nil {
+		return err
+	}
+
+	m.servers[s.ID] = s
+
+	return nil
+}
+
+func (m *Manager) List() []*Server {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make([]*Server, 0, len(m.servers))
+
+	for _, server := range m.servers {
+		copy := *server
+		result = append(result, &copy)
+	}
+
+	return result
+}
+
+func (m *Manager) Get(id string) (*Server, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	server, ok := m.servers[id]
+
+	return server, ok
+}
+
+type FileEntry struct {
+	Name    string `json:"name"`
+	Path    string `json:"path"`
+	Size    int64  `json:"size"`
+	IsDir   bool   `json:"is_dir"`
+	ModTime string `json:"mod_time"`
+}
+
+func (m *Manager) serverPath(id, requested string) (string, error) {
+	server, ok := m.Get(id)
+	if !ok {
+		return "", errors.New("server not found")
+	}
+
+	root, err := filepath.Abs(server.Directory)
+	if err != nil {
+		return "", err
+	}
+
+	requested = strings.TrimSpace(requested)
+	requested = strings.TrimPrefix(requested, "/")
+
+	target := filepath.Join(root, filepath.FromSlash(requested))
+
+	abs, err := filepath.Abs(target)
+	if err != nil {
+		return "", err
+	}
+
+	rel, err := filepath.Rel(root, abs)
+	if err != nil {
+		return "", err
+	}
+
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", errors.New("invalid file path")
+	}
+
+	return abs, nil
+}
+
+func (m *Manager) Files(id, requested string) ([]FileEntry, error) {
+	dir, err := m.serverPath(id, requested)
+	if err != nil {
+		return nil, err
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	if !info.IsDir() {
+		return nil, errors.New("not a directory")
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]FileEntry, 0, len(entries))
+
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+
+		relative, err := filepath.Rel(
+			filepath.Dir(dir),
+			filepath.Join(dir, entry.Name()),
+		)
+		if err != nil {
+			continue
+		}
+
+		result = append(result, FileEntry{
+			Name:    entry.Name(),
+			Path:    filepath.ToSlash(filepath.Join(requested, entry.Name())),
+			Size:    info.Size(),
+			IsDir:   entry.IsDir(),
+			ModTime: info.ModTime().UTC().Format(time.RFC3339),
+		})
+
+		_ = relative
+	}
+
+	return result, nil
+}
+
+func (m *Manager) ReadFile(id, requested string) ([]byte, error) {
+	path, err := m.serverPath(id, requested)
+	if err != nil {
+		return nil, err
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+
+	if info.IsDir() {
+		return nil, errors.New("path is a directory")
+	}
+
+	return os.ReadFile(path)
+}
+
+func (m *Manager) WriteFile(id, requested string, data []byte) error {
+	path, err := m.serverPath(id, requested)
+	if err != nil {
+		return err
+	}
+
+	parent := filepath.Dir(path)
+
+	info, err := os.Stat(parent)
+	if err != nil || !info.IsDir() {
+		return errors.New("parent directory does not exist")
+	}
+
+	return os.WriteFile(path, data, 0640)
+}
+
+func (m *Manager) CreateFolder(id, requested string) error {
+	path, err := m.serverPath(id, requested)
+	if err != nil {
+		return err
+	}
+
+	if err := os.Mkdir(path, 0750); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (m *Manager) DeleteFile(id, requested string) error {
+	path, err := m.serverPath(id, requested)
+	if err != nil {
+		return err
+	}
+
+	if path == filepath.Clean(m.serverPathRoot(id)) {
+		return errors.New("cannot delete server root")
+	}
+
+	return os.RemoveAll(path)
+}
+
+func (m *Manager) RenameFile(id, oldPath, newPath string) error {
+	oldAbs, err := m.serverPath(id, oldPath)
+	if err != nil {
+		return err
+	}
+
+	newAbs, err := m.serverPath(id, newPath)
+	if err != nil {
+		return err
+	}
+
+	if _, err := os.Stat(oldAbs); err != nil {
+		return err
+	}
+
+	if _, err := os.Stat(newAbs); err == nil {
+		return errors.New("destination already exists")
+	}
+
+	return os.Rename(oldAbs, newAbs)
+}
+
+func (m *Manager) serverPathRoot(id string) string {
+	server, ok := m.Get(id)
+	if !ok {
+		return ""
+	}
+
+	root, _ := filepath.Abs(server.Directory)
+	return root
+}
+
+func (m *Manager) FileInfo(id, requested string) (os.FileInfo, error) {
+	path, err := m.serverPath(id, requested)
+	if err != nil {
+		return nil, err
+	}
+
+	return os.Stat(path)
+}
+
+func (m *Manager) FilePath(id, requested string) (string, error) {
+	path, err := m.serverPath(id, requested)
+	if err != nil {
+		return "", fmt.Errorf("invalid path: %w", err)
+	}
+
+	return path, nil
+}
+
+func (m *Manager) Start(id string) error {
+	m.mu.Lock()
+
+	server, exists := m.servers[id]
+
+	if !exists {
+		m.mu.Unlock()
+		return errors.New("server not found")
+	}
+
+	if p, ok := m.processes[id]; ok &&
+		p.state == "running" {
+		m.mu.Unlock()
+		return errors.New("server is already running")
+	}
+
+	command := exec.Command(
+		"sh",
+		"-c",
+		server.Startup,
+	)
+
+	command.Dir = server.Directory
+	command.Env = os.Environ()
+
+	for key, value := range server.Env {
+		command.Env = append(
+			command.Env,
+			key+"="+value,
+		)
+	}
+
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		m.mu.Unlock()
+		return err
+	}
+
+	stderr, err := command.StderrPipe()
+	if err != nil {
+		m.mu.Unlock()
+		return err
+	}
+
+	if err := command.Start(); err != nil {
+		m.mu.Unlock()
+		return err
+	}
+
+	m.processes[id] = &process{
+		cmd:       command,
+		startedAt: time.Now().UTC(),
+		state:     "running",
+	}
+
+	m.mu.Unlock()
+
+	go m.capture(id, stdout)
+	go m.capture(id, stderr)
+	go m.wait(id, command)
+
+	return nil
+}
+
+func (m *Manager) wait(id string, command *exec.Cmd) {
+	err := command.Wait()
+
+	exitCode := 0
+
+	if err != nil {
+		if exitError, ok := err.(*exec.ExitError); ok {
+			exitCode = exitError.ExitCode()
+		} else {
+			exitCode = -1
+		}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if p, ok := m.processes[id]; ok {
+		p.state = "stopped"
+		p.exitCode = &exitCode
+	}
+}
+
+func (m *Manager) capture(
+	id string,
+	reader interface {
+		Read([]byte) (int, error)
+	},
+) {
+	scanner := bufio.NewScanner(reader)
+
+	for scanner.Scan() {
+		m.logMu.Lock()
+
+		m.logs[id] = append(
+			m.logs[id],
+			scanner.Text(),
+		)
+
+		if len(m.logs[id]) > 2000 {
+			m.logs[id] =
+				m.logs[id][len(m.logs[id])-2000:]
+		}
+
+		m.logMu.Unlock()
+	}
+}
+
+func (m *Manager) Stop(id string) error {
+	m.mu.RLock()
+
+	p, exists := m.processes[id]
+
+	m.mu.RUnlock()
+
+	if !exists ||
+		p.cmd == nil ||
+		p.cmd.Process == nil ||
+		p.state != "running" {
+		return errors.New("server is not running")
+	}
+
+	return p.cmd.Process.Signal(os.Interrupt)
+}
+
+func (m *Manager) Kill(id string) error {
+	m.mu.RLock()
+
+	p, exists := m.processes[id]
+
+	m.mu.RUnlock()
+
+	if !exists ||
+		p.cmd == nil ||
+		p.cmd.Process == nil ||
+		p.state != "running" {
+		return errors.New("server is not running")
+	}
+
+	return p.cmd.Process.Kill()
+}
+
+func (m *Manager) Status(id string) (Status, error) {
+	server, exists := m.Get(id)
+
+	if !exists {
+		return Status{}, errors.New("server not found")
+	}
+
+	m.mu.RLock()
+
+	p, running := m.processes[id]
+
+	m.mu.RUnlock()
+
+	result := Status{
+		ID:    server.ID,
+		Name:  server.Name,
+		State: "offline",
+	}
+
+	if !running {
+		return result, nil
+	}
+
+	result.State = p.state
+
+	if p.cmd != nil &&
+		p.cmd.Process != nil &&
+		p.state == "running" {
+		result.PID = p.cmd.Process.Pid
+	}
+
+	result.StartedAt = p.startedAt.Format(time.RFC3339)
+	result.ExitCode = p.exitCode
+
+	return result, nil
+}
+
+func (m *Manager) Logs(id string) ([]string, error) {
+	if _, exists := m.Get(id); !exists {
+		return nil, errors.New("server not found")
+	}
+
+	m.logMu.RLock()
+	defer m.logMu.RUnlock()
+
+	return append(
+		[]string(nil),
+		m.logs[id]...,
+	), nil
+}
+package manager
+
+import "time"
+
+type Server struct {
+	ID        string            `json:"id"`
+	Name      string            `json:"name"`
+	Directory string            `json:"directory"`
+	Startup   string            `json:"startup"`
+	Env       map[string]string `json:"env"`
+	CreatedAt time.Time         `json:"created_at"`
+}
+
+type Status struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	State     string `json:"state"`
+	PID       int    `json:"pid,omitempty"`
+	StartedAt string `json:"started_at,omitempty"`
+	ExitCode  *int   `json:"exit_code,omitempty"`
+}
+package servers
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/Ribco/dinex/panel/internal/database"
+	"github.com/Ribco/dinex/panel/internal/nodes"
+	"github.com/google/uuid"
+)
+
+type Server struct {
+	ID         int64  `json:"id"`
+	UUID       string `json:"uuid"`
+	NodeID     int64  `json:"node_id"`
+	ExternalID string `json:"external_id"`
+	Name       string `json:"name"`
+	CreatedAt  int64  `json:"created_at"`
+}
+
+type AgentServer struct {
+	ID        string            `json:"id"`
+	Name      string            `json:"name"`
+	Directory string            `json:"directory"`
+	Startup   string            `json:"startup"`
+	Env       map[string]string `json:"env"`
+	CreatedAt time.Time         `json:"created_at"`
+}
+
+type Status struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	State     string `json:"state"`
+	PID       int    `json:"pid,omitempty"`
+	StartedAt string `json:"started_at,omitempty"`
+	ExitCode  *int   `json:"exit_code,omitempty"`
+}
+
+type Manager struct {
+	DB    *database.DB
+	Nodes *nodes.Manager
+}
+
+func New(db *database.DB, nodeManager *nodes.Manager) *Manager {
+	return &Manager{
+		DB:    db,
+		Nodes: nodeManager,
+	}
+}
+
+func (m *Manager) List() ([]Server, error) {
+	rows, err := m.DB.SQL.Query(`
+SELECT id, user_id, uuid, node_id, external_id, name, created_at
+FROM servers
+ORDER BY id DESC
+`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []Server
+
+	for rows.Next() {
+		var s Server
+
+		var userID *int64
+
+		if err := rows.Scan(
+			&s.ID,
+			&userID,
+			&s.UUID,
+			&s.NodeID,
+			&s.ExternalID,
+			&s.Name,
+			&s.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+
+		result = append(result, s)
+	}
+
+	return result, rows.Err()
+}
+
+func (m *Manager) GetByUUID(uuid string) (*Server, error) {
+	var s Server
+
+	err := m.DB.SQL.QueryRow(`
+SELECT id, uuid, node_id, external_id, name, created_at
+FROM servers
+WHERE uuid = ?
+`, uuid).Scan(
+		&s.ID,
+		&s.UUID,
+		&s.NodeID,
+		&s.ExternalID,
+		&s.Name,
+		&s.CreatedAt,
+	)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &s, nil
+}
+
+func (m *Manager) Create(
+	userID int64,
+	nodeID int64,
+	id string,
+	name string,
+	startup string,
+	env map[string]string,
+) error {
+	id = strings.TrimSpace(id)
+	name = strings.TrimSpace(name)
+	startup = strings.TrimSpace(startup)
+
+	serverUUID := uuid.New().String()
+	if id == "" {
+		return errors.New("server ID is required")
+	}
+
+	if name == "" {
+		return errors.New("server name is required")
+	}
+
+	if startup == "" {
+		return errors.New("startup command is required")
+	}
+
+	node, err := m.Nodes.Get(nodeID)
+	if err != nil {
+		return errors.New("node not found")
+	}
+
+	payload := AgentServer{
+		ID:      id,
+		Name:    name,
+		Startup: startup,
+		Env:     env,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	resp, err := m.request(
+		node,
+		http.MethodPost,
+		"/api/v1/servers",
+		body,
+	)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("agent returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+
+	var created AgentServer
+
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		return err
+	}
+
+	_, err = m.DB.SQL.Exec(`
+INSERT INTO servers
+(user_id, uuid, node_id, external_id, name, created_at)
+VALUES (?, ?, ?, ?, ?, ?)
+`,
+		userID,
+		serverUUID,
+		nodeID,
+		created.ID,
+		created.Name,
+		database.Now())
+
+	return err
+}
+
+func (m *Manager) Status(server Server) (Status, error) {
+	node, err := m.Nodes.Get(server.NodeID)
+	if err != nil {
+		return Status{}, errors.New("node not found")
+	}
+
+	resp, err := m.request(
+		node,
+		http.MethodGet,
+		"/api/v1/servers/"+server.ExternalID,
+		nil,
+	)
+	if err != nil {
+		return Status{}, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return Status{}, fmt.Errorf("agent returned HTTP %d", resp.StatusCode)
+	}
+
+	var status Status
+
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		return Status{}, err
+	}
+
+	return status, nil
+}
+
+func (m *Manager) Action(server Server, action string) error {
+	if action != "start" && action != "stop" && action != "kill" {
+		return errors.New("invalid action")
+	}
+
+	node, err := m.Nodes.Get(server.NodeID)
+	if err != nil {
+		return errors.New("node not found")
+	}
+
+	resp, err := m.request(
+		node,
+		http.MethodPost,
+		"/api/v1/servers/"+server.ExternalID+"/"+action,
+		nil,
+	)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("agent returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+
+	return nil
+}
+
+func (m *Manager) Logs(server Server) ([]string, error) {
+	node, err := m.Nodes.Get(server.NodeID)
+	if err != nil {
+		return nil, errors.New("node not found")
+	}
+
+	resp, err := m.request(
+		node,
+		http.MethodGet,
+		"/api/v1/servers/"+server.ExternalID+"/logs",
+		nil,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("agent returned HTTP %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Lines []string `json:"lines"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	return result.Lines, nil
+}
+
+func (m *Manager) Files(server Server, path string) ([]byte, int, string, error) {
+	node, err := m.Nodes.Get(server.NodeID)
+	if err != nil {
+		return nil, 0, "", errors.New("node not found")
+	}
+
+	escaped := url.QueryEscape(path)
+	resp, err := m.request(
+		node,
+		http.MethodGet,
+		"/api/v1/servers/"+server.ExternalID+"/files?path="+escaped,
+		nil,
+	)
+	if err != nil {
+		return nil, 0, "", err
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, resp.Header.Get("Content-Type"), err
+	}
+
+	return data, resp.StatusCode, resp.Header.Get("Content-Type"), nil
+}
+
+func (m *Manager) ReadFile(server Server, path string) ([]byte, int, string, error) {
+	node, err := m.Nodes.Get(server.NodeID)
+	if err != nil {
+		return nil, 0, "", errors.New("node not found")
+	}
+
+	resp, err := m.request(
+		node,
+		http.MethodGet,
+		"/api/v1/servers/"+server.ExternalID+"/file?path="+url.QueryEscape(path),
+		nil,
+	)
+	if err != nil {
+		return nil, 0, "", err
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, resp.Header.Get("Content-Type"), err
+	}
+
+	return data, resp.StatusCode, resp.Header.Get("Content-Type"), nil
+}
+
+func (m *Manager) WriteFile(server Server, path string, body []byte) (int, error) {
+	node, err := m.Nodes.Get(server.NodeID)
+	if err != nil {
+		return 0, errors.New("node not found")
+	}
+
+	resp, err := m.request(
+		node,
+		http.MethodPut,
+		"/api/v1/servers/"+server.ExternalID+"/file?path="+url.QueryEscape(path),
+		body,
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	return resp.StatusCode, nil
+}
+
+func (m *Manager) CreateFolder(server Server, path string) (int, error) {
+	node, err := m.Nodes.Get(server.NodeID)
+	if err != nil {
+		return 0, errors.New("node not found")
+	}
+
+	resp, err := m.request(
+		node,
+		http.MethodPost,
+		"/api/v1/servers/"+server.ExternalID+"/folder?path="+url.QueryEscape(path),
+		nil,
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	return resp.StatusCode, nil
+}
+
+func (m *Manager) DeleteFile(server Server, path string) (int, error) {
+	node, err := m.Nodes.Get(server.NodeID)
+	if err != nil {
+		return 0, errors.New("node not found")
+	}
+
+	resp, err := m.request(
+		node,
+		http.MethodDelete,
+		"/api/v1/servers/"+server.ExternalID+"/files?path="+url.QueryEscape(path),
+		nil,
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	return resp.StatusCode, nil
+}
+
+func (m *Manager) RenameFile(server Server, oldPath, newPath string) (int, error) {
+	node, err := m.Nodes.Get(server.NodeID)
+	if err != nil {
+		return 0, errors.New("node not found")
+	}
+
+	payload := []byte(`{"old_path":` + strconv.Quote(oldPath) +
+		`,"new_path":` + strconv.Quote(newPath) + `}`)
+
+	resp, err := m.request(
+		node,
+		http.MethodPost,
+		"/api/v1/servers/"+server.ExternalID+"/rename",
+		payload,
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	return resp.StatusCode, nil
+}
+
+func (m *Manager) DownloadFile(server Server, path string) ([]byte, int, string, error) {
+	node, err := m.Nodes.Get(server.NodeID)
+	if err != nil {
+		return nil, 0, "", errors.New("node not found")
+	}
+
+	resp, err := m.request(
+		node,
+		http.MethodGet,
+		"/api/v1/servers/"+server.ExternalID+"/download?path="+url.QueryEscape(path),
+		nil,
+	)
+	if err != nil {
+		return nil, 0, "", err
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, resp.Header.Get("Content-Type"), err
+	}
+
+	return data, resp.StatusCode, resp.Header.Get("Content-Type"), nil
+}
+
+func (m *Manager) request(
+	node *nodes.Node,
+	method string,
+	path string,
+	body []byte,
+) (*http.Response, error) {
+	url := strings.TrimRight(node.Address, "/") + path
+
+	var reader *bytes.Reader
+
+	if body == nil {
+		reader = bytes.NewReader(nil)
+	} else {
+		reader = bytes.NewReader(body)
+	}
+
+	req, err := http.NewRequest(method, url, reader)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Authorization", "Bearer "+node.Token)
+
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+
+	return client.Do(req)
+}
+package api
+
+import (
+	"encoding/json"
+	"html/template"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
+
+	"github.com/Ribco/dinex/panel/internal/auth"
+	"github.com/Ribco/dinex/panel/internal/nodes"
+	"github.com/Ribco/dinex/panel/internal/servers"
+)
+
+type ServerAPI struct {
+	Servers *servers.Manager
+	Nodes   *nodes.Manager
+	Auth    *auth.Auth
+}
+
+func NewServerAPI(manager *servers.Manager, nodeManager *nodes.Manager, authManager *auth.Auth) *ServerAPI {
+	return &ServerAPI{Servers: manager, Nodes: nodeManager, Auth: authManager}
+}
+
+func (a *ServerAPI) Page(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		list, err := a.Servers.List()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		type ServerView struct {
+			Server servers.Server
+			Status servers.Status
+			Error  string
+		}
+
+		views := make([]ServerView, 0, len(list))
+
+		for _, server := range list {
+			status, err := a.Servers.Status(server)
+
+			view := ServerView{
+				Server: server,
+				Status: status,
+			}
+
+			if err != nil {
+				view.Error = err.Error()
+			}
+
+			views = append(views, view)
+		}
+
+		tmpl, err := template.ParseFiles(
+			"panel/web/templates/servers.html",
+		)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		nodeList, err := a.Nodes.List()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		data := struct {
+			Servers []ServerView
+			Nodes   []nodes.Node
+		}{Servers: views, Nodes: nodeList}
+		_ = tmpl.Execute(w, data)
+		return
+	}
+
+	if r.Method == http.MethodPost {
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "invalid form", http.StatusBadRequest)
+			return
+		}
+
+		nodeID, err := strconv.ParseInt(r.FormValue("node_id"), 10, 64)
+		if err != nil {
+			http.Error(w, "invalid node ID", http.StatusBadRequest)
+			return
+		}
+
+		userID, ok := a.Auth.UserFromRequest(r)
+		if !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		env := map[string]string{}
+
+		if err := a.Servers.Create(
+			userID,
+			nodeID,
+			r.FormValue("id"),
+			r.FormValue("name"),
+			r.FormValue("startup"),
+			env,
+		); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		http.Redirect(w, r, "/servers", http.StatusSeeOther)
+		return
+	}
+
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+}
+
+func (a *ServerAPI) Action(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	path := strings.TrimPrefix(r.URL.Path, "/servers/")
+	path = strings.TrimSuffix(path, "/")
+
+	parts := strings.Split(path, "/")
+
+	if len(parts) != 2 {
+		http.Error(w, "invalid server action", http.StatusBadRequest)
+		return
+	}
+
+	serverID, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		http.Error(w, "invalid server ID", http.StatusBadRequest)
+		return
+	}
+
+	action := parts[1]
+
+	list, err := a.Servers.List()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	var target *servers.Server
+
+	for _, server := range list {
+		if server.ID == serverID {
+			copy := server
+			target = &copy
+			break
+		}
+	}
+
+	if target == nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	if err := a.Servers.Action(*target, action); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	http.Redirect(w, r, "/servers/"+target.UUID, http.StatusSeeOther)
+}
+
+func (a *ServerAPI) ServerPage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	uuid := strings.TrimPrefix(r.URL.Path, "/servers/")
+	uuid = strings.TrimSuffix(uuid, "/")
+
+	if uuid == "" || strings.Contains(uuid, "/") {
+		http.NotFound(w, r)
+		return
+	}
+
+	server, err := a.Servers.GetByUUID(uuid)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	status, statusErr := a.Servers.Status(*server)
+
+	tmpl, err := template.ParseFiles(
+		"panel/web/templates/server.html",
+	)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	data := struct {
+		Server servers.Server
+		Status servers.Status
+		Error  string
+	}{
+		Server: *server,
+		Status: status,
+	}
+
+	if statusErr != nil {
+		data.Error = statusErr.Error()
+	}
+
+	_ = tmpl.Execute(w, data)
+}
+
+func (a *ServerAPI) FilesAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	uuid := strings.TrimPrefix(r.URL.Path, "/api/servers/")
+	uuid = strings.TrimSuffix(uuid, "/files")
+
+	server, err := a.Servers.GetByUUID(uuid)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	data, status, contentType, err := a.Servers.Files(
+		*server,
+		r.URL.Query().Get("path"),
+	)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", contentType)
+	w.WriteHeader(status)
+	_, _ = w.Write(data)
+}
+
+func (a *ServerAPI) FileAPI(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/servers/")
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+
+	if len(parts) < 2 {
+		http.NotFound(w, r)
+		return
+	}
+
+	uuid := parts[0]
+	action := parts[1]
+
+	server, err := a.Servers.GetByUUID(uuid)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	switch action {
+	case "file":
+		if r.Method == http.MethodGet {
+			data, status, contentType, err := a.Servers.ReadFile(
+				*server,
+				r.URL.Query().Get("path"),
+			)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+
+			w.Header().Set("Content-Type", contentType)
+			w.WriteHeader(status)
+			_, _ = w.Write(data)
+			return
+		}
+
+		if r.Method == http.MethodPut {
+			data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 50<<20))
+			if err != nil {
+				http.Error(w, "failed to read file", http.StatusBadRequest)
+				return
+			}
+
+			status, err := a.Servers.WriteFile(
+				*server,
+				r.URL.Query().Get("path"),
+				data,
+			)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+
+			w.WriteHeader(status)
+			return
+		}
+
+	case "folder":
+		if r.Method == http.MethodPost {
+			status, err := a.Servers.CreateFolder(
+				*server,
+				r.URL.Query().Get("path"),
+			)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+
+			w.WriteHeader(status)
+			return
+		}
+
+	case "files":
+		if r.Method == http.MethodGet {
+			data, status, contentType, err := a.Servers.Files(
+				*server,
+				r.URL.Query().Get("path"),
+			)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+
+			w.Header().Set("Content-Type", contentType)
+			w.WriteHeader(status)
+			_, _ = w.Write(data)
+			return
+		}
+
+		if r.Method == http.MethodDelete {
+			status, err := a.Servers.DeleteFile(
+				*server,
+				r.URL.Query().Get("path"),
+			)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+
+			w.WriteHeader(status)
+			return
+		}
+
+	case "rename":
+		if r.Method == http.MethodPost {
+			data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024*1024))
+			if err != nil {
+				http.Error(w, "invalid request", http.StatusBadRequest)
+				return
+			}
+
+			var payload struct {
+				OldPath string `json:"old_path"`
+				NewPath string `json:"new_path"`
+			}
+
+			if err := json.Unmarshal(data, &payload); err != nil {
+				http.Error(w, "invalid JSON", http.StatusBadRequest)
+				return
+			}
+
+			status, err := a.Servers.RenameFile(
+				*server,
+				payload.OldPath,
+				payload.NewPath,
+			)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+
+			w.WriteHeader(status)
+			return
+		}
+
+	case "download":
+		if r.Method == http.MethodGet {
+			data, status, contentType, err := a.Servers.DownloadFile(
+				*server,
+				r.URL.Query().Get("path"),
+			)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+
+			w.Header().Set("Content-Type", contentType)
+			w.WriteHeader(status)
+			_, _ = w.Write(data)
+			return
+		}
+	}
+
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+}
+
+func (a *ServerAPI) JSON(w http.ResponseWriter, r *http.Request) {
+	list, err := a.Servers.List()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	type Response struct {
+		Server servers.Server `json:"server"`
+		Status servers.Status `json:"status"`
+		Error  string         `json:"error,omitempty"`
+	}
+
+	result := make([]Response, 0, len(list))
+
+	for _, server := range list {
+		status, err := a.Servers.Status(server)
+
+		item := Response{
+			Server: server,
+			Status: status,
+		}
+
+		if err != nil {
+			item.Error = err.Error()
+		}
+
+		result = append(result, item)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(result)
+}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dinex — {{.Server.Name}}</title>
+
+<style>
+*{box-sizing:border-box}
+
+:root{
+    --bg:#111;
+    --nav:#171717;
+    --panel:#262626;
+    --panel2:#303030;
+    --border:#404040;
+    --text:#f5f5f5;
+    --muted:#a3a3a3;
+    --cyan:#22d3ee;
+    --green:#22c55e;
+    --yellow:#eab308;
+    --red:#ef4444;
+}
+
+body{
+    margin:0;
+    background:var(--bg);
+    color:var(--text);
+    font-family:Inter,ui-sans-serif,system-ui,sans-serif;
+}
+
+a{
+    color:inherit;
+    text-decoration:none;
+}
+
+.topbar{
+    height:56px;
+    background:var(--nav);
+    box-shadow:0 2px 8px rgba(0,0,0,.35);
+}
+
+.topbar-inner{
+    max-width:1200px;
+    height:100%;
+    margin:auto;
+    padding:0 16px;
+    display:flex;
+    align-items:center;
+}
+
+.logo{
+    flex:1;
+    font-size:22px;
+    font-weight:600;
+}
+
+.logo span{
+    color:var(--cyan);
+}
+
+.nav{
+    height:100%;
+    display:flex;
+}
+
+.nav a{
+    display:flex;
+    align-items:center;
+    padding:0 18px;
+    color:#a3a3a3;
+    border-bottom:2px solid transparent;
+}
+
+.nav a:hover{
+    color:#fff;
+}
+
+.nav a.active{
+    color:#fff;
+    border-bottom-color:var(--cyan);
+    background:#101010;
+}
+
+.subnav{
+    height:48px;
+    background:#202020;
+    box-shadow:0 2px 5px rgba(0,0,0,.3);
+}
+
+.subnav-inner{
+    max-width:1200px;
+    height:100%;
+    margin:auto;
+    padding:0 16px;
+    display:flex;
+    align-items:center;
+    gap:4px;
+}
+
+.subnav a{
+    height:100%;
+    display:flex;
+    align-items:center;
+    padding:0 14px;
+    color:#a3a3a3;
+    font-size:13px;
+    border-bottom:2px solid transparent;
+}
+
+.subnav a:hover,
+.subnav a.active{
+    color:#fff;
+    border-bottom-color:var(--cyan);
+}
+
+.page{
+    max-width:1200px;
+    margin:auto;
+    padding:32px 16px 48px;
+}
+
+.hero{
+    display:grid;
+    grid-template-columns:1fr auto;
+    align-items:end;
+    gap:20px;
+    margin-bottom:18px;
+}
+
+.hero h1{
+    margin:0;
+    font-size:27px;
+    font-weight:600;
+}
+
+.hero p{
+    margin:5px 0 0;
+    color:var(--muted);
+    font-size:14px;
+}
+
+.status{
+    margin-top:10px;
+    font-size:13px;
+    color:var(--muted);
+}
+
+.dot{
+    display:inline-block;
+    width:8px;
+    height:8px;
+    margin-right:6px;
+    border-radius:50%;
+    background:#737373;
+}
+
+.running .dot{
+    background:var(--green);
+}
+
+.offline .dot{
+    background:var(--red);
+}
+
+.actions{
+    display:flex;
+    gap:8px;
+}
+
+button{
+    border:0;
+    border-radius:4px;
+    padding:10px 17px;
+    font:inherit;
+    font-weight:600;
+    cursor:pointer;
+    transition:.15s;
+}
+
+.start{
+    background:#16a34a;
+    color:#fff;
+}
+
+.start:hover{
+    background:#22c55e;
+}
+
+.stop{
+    background:#ca8a04;
+    color:#fff;
+}
+
+.stop:hover{
+    background:#eab308;
+}
+
+.kill{
+    background:#dc2626;
+    color:#fff;
+}
+
+.kill:hover{
+    background:#ef4444;
+}
+
+.layout{
+    display:grid;
+    grid-template-columns:minmax(0,3fr) minmax(260px,1fr);
+    gap:16px;
+}
+
+.console{
+    min-width:0;
+    border-radius:5px;
+    overflow:hidden;
+    background:#000;
+    box-shadow:0 4px 12px rgba(0,0,0,.35);
+}
+
+.console-head{
+    padding:10px 14px;
+    background:#1a1a1a;
+    border-bottom:1px solid #292929;
+    color:#a3a3a3;
+    font-size:12px;
+    font-family:monospace;
+}
+
+.terminal{
+    min-height:390px;
+    padding:16px;
+    background:#000;
+    color:#d4d4d4;
+    font:12px/1.6 "SFMono-Regular",Consolas,monospace;
+    overflow:auto;
+}
+
+.prompt{
+    color:#facc15;
+    font-weight:bold;
+}
+
+.command{
+    border-top:1px solid #292929;
+    background:#171717;
+    position:relative;
+}
+
+.command input{
+    width:100%;
+    border:0;
+    outline:0;
+    padding:12px 14px 12px 38px;
+    background:#171717;
+    color:#f5f5f5;
+    font:13px monospace;
+}
+
+.command input:focus{
+    border-bottom:2px solid var(--cyan);
+}
+
+.command::before{
+    content:">";
+    position:absolute;
+    left:14px;
+    top:10px;
+    color:#e5e5e5;
+    font-weight:bold;
+    z-index:1;
+}
+
+.stats{
+    display:flex;
+    flex-direction:column;
+    gap:8px;
+}
+
+.stat{
+    position:relative;
+    display:flex;
+    align-items:center;
+    min-height:82px;
+    padding:12px;
+    background:#262626;
+    border-radius:5px;
+    overflow:hidden;
+    box-shadow:0 3px 8px rgba(0,0,0,.2);
+}
+
+.stat-icon{
+    width:42px;
+    height:42px;
+    margin-right:12px;
+    flex:none;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    border-radius:6px;
+    background:#404040;
+    color:#e5e5e5;
+    font-size:18px;
+}
+
+.stat-title{
+    color:#a3a3a3;
+    font-size:11px;
+    text-transform:uppercase;
+}
+
+.stat-value{
+    margin-top:2px;
+    color:#f5f5f5;
+    font-weight:600;
+    font-size:14px;
+    word-break:break-word;
+}
+
+.stat-bar{
+    position:absolute;
+    left:0;
+    top:0;
+    bottom:0;
+    width:3px;
+    background:#525252;
+}
+
+.server-info{
+    display:grid;
+    grid-template-columns:repeat(3,1fr);
+    gap:8px;
+    margin-top:16px;
+}
+
+.info{
+    background:#262626;
+    border-radius:5px;
+    padding:16px;
+}
+
+.info-title{
+    color:#a3a3a3;
+    font-size:11px;
+    text-transform:uppercase;
+}
+
+.info-value{
+    margin-top:5px;
+    font-size:14px;
+    word-break:break-all;
+}
+
+@media(max-width:850px){
+    .layout{
+        grid-template-columns:1fr;
+    }
+
+    .stats{
+        display:grid;
+        grid-template-columns:repeat(2,1fr);
+    }
+}
+
+@media(max-width:600px){
+    .nav a{
+        padding:0 8px;
+        font-size:12px;
+    }
+
+    .hero{
+        grid-template-columns:1fr;
+        align-items:start;
+    }
+
+    .actions{
+        width:100%;
+    }
+
+    .actions form{
+        flex:1;
+    }
+
+    .actions button{
+        width:100%;
+    }
+
+    .subnav-inner{
+        overflow-x:auto;
+    }
+
+    .server-info{
+        grid-template-columns:1fr;
+    }
+
+    .stats{
+        grid-template-columns:1fr;
+    }
+
+    .terminal{
+        min-height:300px;
+    }
+}
+</style>
+    <link rel="stylesheet" href="/static/css/dinex.css">
+</head>
+
+<body>
+<div id="dinex-loader">
+    <div class="dinex-loader-logo">♥</div>
+    <div class="dinex-loader-name">Dinex</div>
+    <div class="dinex-loader-spinner"></div>
+</div>
+
+<script src="/static/js/dinex.js"></script>
+
+<header class="topbar">
+<div class="topbar-inner">
+
+<a class="logo" href="/dashboard">Din<span>ex</span></a>
+
+<nav class="nav">
+<a href="/dashboard">Dashboard</a>
+<a href="/servers" class="active">Servers</a>
+<a href="/nodes">Nodes</a>
+</nav>
+
+</div>
+</header>
+
+<div class="subnav">
+<div class="subnav-inner">
+<a href="/servers/{{.Server.UUID}}" class="active">Console</a>
+<a href="/servers/{{.Server.UUID}}">Overview</a>
+</div>
+</div>
+
+<main class="page">
+
+<section class="hero">
+
+<div>
+<h1>{{.Server.Name}}</h1>
+
+<p>
+Server ID: {{.Server.ExternalID}}
+</p>
+
+<div class="{{if eq .Status.State "running"}}status running{{else}}status offline{{end}}">
+<span class="dot"></span>
+
+{{if .Error}}
+Agent Error
+{{else if eq .Status.State "running"}}
+Running
+{{else}}
+{{.Status.State}}
+{{end}}
+
+</div>
+</div>
+
+<div class="actions">
+
+<form method="POST" action="/servers/{{.Server.UUID}}/start">
+<button class="start">Start</button>
+</form>
+
+<form method="POST" action="/servers/{{.Server.UUID}}/stop">
+<button class="stop">Stop</button>
+</form>
+
+<form method="POST" action="/servers/{{.Server.UUID}}/kill" onsubmit="return confirm('Forcibly stop this server? This can cause data corruption.')">
+<button class="kill">Kill</button>
+</form>
+
+</div>
+
+</section>
+
+<div class="layout">
+
+<section>
+
+<div class="console">
+
+<div class="console-head">
+console
+</div>
+
+<div class="terminal">
+
+{{if .Error}}
+
+<span style="color:#ef4444">Agent error:</span>
+{{.Error}}
+
+{{else}}
+
+<span class="prompt">container@dinex~</span> Server connected...
+
+<br>
+
+<span class="prompt">container@dinex~</span> Waiting for console output...
+
+{{end}}
+
+</div>
+
+<div class="command">
+<input type="text" placeholder="Type a command..." disabled>
+</div>
+
+</div>
+
+<div class="server-info">
+
+<div class="info">
+<div class="info-title">Server ID</div>
+<div class="info-value">{{.Server.ExternalID}}</div>
+</div>
+
+<div class="info">
+<div class="info-title">Node</div>
+<div class="info-value">{{.Server.NodeID}}</div>
+</div>
+
+<div class="info">
+<div class="info-title">Process</div>
+<div class="info-value">
+{{if .Status.PID}}{{.Status.PID}}{{else}}—{{end}}
+</div>
+</div>
+
+</div>
+
+</section>
+
+<aside class="stats">
+
+<div class="stat">
+<div class="stat-bar"></div>
+<div class="stat-icon">⌁</div>
+<div>
+<div class="stat-title">Address</div>
+<div class="stat-value">Node {{.Server.NodeID}}</div>
+</div>
+</div>
+
+<div class="stat">
+<div class="stat-bar"></div>
+<div class="stat-icon">◷</div>
+<div>
+<div class="stat-title">Status</div>
+<div class="stat-value">{{.Status.State}}</div>
+</div>
+</div>
+
+<div class="stat">
+<div class="stat-bar"></div>
+<div class="stat-icon">⚙</div>
+<div>
+<div class="stat-title">Process</div>
+<div class="stat-value">
+{{if .Status.PID}}{{.Status.PID}}{{else}}Offline{{end}}
+</div>
+</div>
+</div>
+
+<div class="stat">
+<div class="stat-bar"></div>
+<div class="stat-icon">▣</div>
+<div>
+<div class="stat-title">Node ID</div>
+<div class="stat-value">{{.Server.NodeID}}</div>
+</div>
+</div>
+
+</aside>
+
+</div>
+
+</main>
+
+
+<style>
+#dinex-files{margin-top:24px}
+.df-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap}
+.df-title{font-size:20px;font-weight:800}
+.df-actions{display:flex;gap:8px;flex-wrap:wrap}
+.df-btn{border:1px solid #293342;background:#151c25;color:#e6edf3;border-radius:8px;padding:9px 12px;cursor:pointer;font-weight:700}
+.df-btn:hover{background:#202a36}
+.df-btn.primary{background:#f97316;border-color:#f97316;color:#fff}
+.df-crumbs{display:flex;align-items:center;gap:5px;overflow:auto;white-space:nowrap;padding:10px 12px;background:#0f151d;border:1px solid #252f3c;border-radius:9px;margin-bottom:10px}
+.df-crumb{color:#9aa4b2;cursor:pointer}
+.df-crumb:hover{color:#fff}
+.df-sep{color:#586474}
+.df-list{border:1px solid #252f3c;border-radius:10px;overflow:hidden;background:#111821}
+.df-row{display:flex;align-items:center;gap:12px;padding:13px 15px;border-bottom:1px solid #202936}
+.df-row:last-child{border-bottom:0}
+.df-row:hover{background:#171f29}
+.df-icon{width:28px;text-align:center;font-size:18px}
+.df-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}
+.df-meta{color:#687587;font-size:12px}
+.df-menu{display:flex;gap:5px}
+.df-empty{padding:45px;text-align:center;color:#7d8794}
+.df-modal{position:fixed;inset:0;background:rgba(0,0,0,.65);display:none;align-items:center;justify-content:center;z-index:9000;padding:15px}
+.df-modal.show{display:flex}
+.df-box{width:min(850px,100%);max-height:90vh;background:#101720;border:1px solid #2a3543;border-radius:12px;overflow:hidden;box-shadow:0 20px 60px #000}
+.df-box-head{display:flex;justify-content:space-between;align-items:center;padding:15px 18px;border-bottom:1px solid #27313d}
+.df-box-head strong{font-size:16px}
+.df-box-body{padding:15px}
+#df-editor{width:100%;height:55vh;resize:vertical;background:#0a0f15;color:#e6edf3;border:1px solid #293342;border-radius:8px;padding:14px;font:13px/1.55 monospace;outline:none}
+.df-input{width:100%;background:#0a0f15;color:#fff;border:1px solid #293342;border-radius:8px;padding:11px;outline:none}
+.df-footer{display:flex;justify-content:flex-end;gap:8px;padding:12px 15px;border-top:1px solid #27313d}
+@media(max-width:650px){
+ .df-meta{display:none}
+ .df-row{padding:12px 10px}
+ .df-menu .df-btn{padding:7px}
+}
+</style>
+
+<section id="dinex-files">
+ <div class="df-head">
+  <div>
+   <div class="df-title">Files</div>
+   <div style="color:#7d8794;font-size:13px;margin-top:3px">Manage your server files.</div>
+  </div>
+  <div class="df-actions">
+   <button class="df-btn primary" type="button" onclick="dfOpenFiles()">＋ Files</button>
+   <button class="df-btn" onclick="dfRefresh()">↻ Refresh</button>
+   <button class="df-btn primary" type="button" onclick="document.getElementById('dinex-files').scrollIntoView({behavior:'smooth'})">＋ Files</button>
+   <button class="df-btn" onclick="dfNewFolder()">＋ Folder</button>
+   <label class="df-btn primary" style="cursor:pointer">
+    ↑ Upload
+    <input id="df-upload" type="file" multiple hidden onchange="dfUpload(this)">
+   </label>
+  </div>
+ </div>
+
+ <div id="df-crumbs" class="df-crumbs"></div>
+ <div id="df-list" class="df-list">
+  <div class="df-empty">Loading files…</div>
+ </div>
+</section>
+
+<div id="df-editor-modal" class="df-modal">
+ <div class="df-box">
+  <div class="df-box-head">
+   <strong id="df-editor-title">Edit file</strong>
+   <button class="df-btn" onclick="dfClose('df-editor-modal')">✕</button>
+  </div>
+  <div class="df-box-body">
+   <textarea id="df-editor" spellcheck="false"></textarea>
+  </div>
+  <div class="df-footer">
+   <button class="df-btn" onclick="dfClose('df-editor-modal')">Cancel</button>
+   <button class="df-btn primary" onclick="dfSave()">Save</button>
+  </div>
+ </div>
+</div>
+
+<div id="df-folder-modal" class="df-modal">
+ <div class="df-box" style="max-width:430px">
+  <div class="df-box-head">
+   <strong>New folder</strong>
+   <button class="df-btn" onclick="dfClose('df-folder-modal')">✕</button>
+  </div>
+  <div class="df-box-body">
+   <input id="df-folder-name" class="df-input" placeholder="Folder name">
+  </div>
+  <div class="df-footer">
+   <button class="df-btn" onclick="dfClose('df-folder-modal')">Cancel</button>
+   <button class="df-btn primary" onclick="dfCreateFolder()">Create</button>
+  </div>
+ </div>
+</div>
+
+<script>
+(function(){
+ const serverUUID = "{{.Server.UUID}}";
+ let currentPath = "";
+ let editingPath = "";
+
+ function api(path, opts){
+   return fetch("/api/servers/"+encodeURIComponent(serverUUID)+path, opts || {});
+ }
+
+ window.dfClose = function(id){
+   document.getElementById(id).classList.remove("show");
+ };
+
+ function esc(v){
+   return String(v ?? "").replace(/[&<>"']/g,c=>({
+     "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+   }[c]));
+ }
+
+ function join(a,b){
+   return [a,b].filter(Boolean).join("/").replace(/\/+/g,"/");
+ }
+
+ function parentPath(path){
+   let p=path.replace(/\/+$/,"");
+   let i=p.lastIndexOf("/");
+   return i<0 ? "" : p.slice(0,i);
+ }
+
+ function fileName(path){
+   return path.split("/").pop();
+ }
+
+ function renderCrumbs(){
+   const el=document.getElementById("df-crumbs");
+   let parts=currentPath ? currentPath.split("/").filter(Boolean) : [];
+   let html='<span class="df-crumb" onclick="dfOpen(\'\')">Home</span>';
+   let acc="";
+   parts.forEach((part,i)=>{
+     acc=join(acc,part);
+     html+='<span class="df-sep">/</span>';
+     html+='<span class="df-crumb" data-path="'+esc(acc)+'">'+esc(part)+'</span>';
+   });
+   el.innerHTML=html;
+   el.querySelectorAll("[data-path]").forEach(x=>{
+     x.onclick=()=>dfOpen(x.dataset.path);
+   });
+ }
+
+ window.dfOpen = async function(path){
+   currentPath=path || "";
+   renderCrumbs();
+
+   const list=document.getElementById("df-list");
+   list.innerHTML='<div class="df-empty">Loading files…</div>';
+
+   try{
+     const res=await api("/files?path="+encodeURIComponent(currentPath));
+     if(!res.ok) throw new Error(await res.text());
+     const data=await res.json();
+
+     const files=Array.isArray(data) ? data : (data.files || data.items || []);
+     if(!files.length){
+       list.innerHTML='<div class="df-empty">This folder is empty.</div>';
+       return;
+     }
+
+     list.innerHTML="";
+     files.forEach(item=>{
+       const name=item.name || item.Name || fileName(item.path || item.Path || "");
+       const path=item.path || item.Path || join(currentPath,name);
+       const dir=item.directory ?? item.Directory ?? item.is_dir ?? item.IsDir ?? false;
+       const row=document.createElement("div");
+       row.className="df-row";
+
+       row.innerHTML=
+        '<div class="df-icon">'+(dir?"📁":"📄")+'</div>'+
+        '<div class="df-name" title="'+esc(path)+'">'+esc(name)+'</div>'+
+        '<div class="df-meta">'+(dir?"Folder":formatSize(item.size || item.Size || 0))+'</div>'+
+        '<div class="df-menu">'+
+          (dir
+            ? '<button class="df-btn open-btn">Open</button>'
+            : '<button class="df-btn edit-btn">Edit</button>'+
+              '<button class="df-btn download-btn">↓</button>')+
+          '<button class="df-btn rename-btn">✎</button>'+
+          '<button class="df-btn delete-btn">🗑</button>'+
+        '</div>';
+
+       row.querySelector(".df-name").onclick=()=>dir?dfOpen(path):dfEdit(path);
+       if(row.querySelector(".open-btn")) row.querySelector(".open-btn").onclick=()=>dfOpen(path);
+       if(row.querySelector(".edit-btn")) row.querySelector(".edit-btn").onclick=()=>dfEdit(path);
+       if(row.querySelector(".download-btn")) row.querySelector(".download-btn").onclick=()=>dfDownload(path);
+       row.querySelector(".rename-btn").onclick=()=>dfRename(path);
+       row.querySelector(".delete-btn").onclick=()=>dfDelete(path);
+
+       list.appendChild(row);
+     });
+   }catch(e){
+     list.innerHTML='<div class="df-empty">Failed to load files: '+esc(e.message)+'</div>';
+   }
+ };
+
+ function formatSize(n){
+   n=Number(n)||0;
+   if(n<1024)return n+" B";
+   if(n<1048576)return (n/1024).toFixed(1)+" KB";
+   if(n<1073741824)return (n/1048576).toFixed(1)+" MB";
+   return (n/1073741824).toFixed(1)+" GB";
+ }
+
+ window.dfOpenFiles=function(){
+  const el=document.getElementById("dinex-files");
+  if(el) el.scrollIntoView({behavior:"smooth",block:"start"});
+};
+
+window.dfRefresh=()=>dfOpen(currentPath);
+
+ window.dfNewFolder=function(){
+   document.getElementById("df-folder-name").value="";
+   document.getElementById("df-folder-modal").classList.add("show");
+   setTimeout(()=>document.getElementById("df-folder-name").focus(),50);
+ };
+
+ window.dfCreateFolder=async function(){
+   const name=document.getElementById("df-folder-name").value.trim();
+   if(!name)return;
+
+   const path=join(currentPath,name);
+   const res=await api("/folder?path="+encodeURIComponent(path),{method:"POST"});
+   if(!res.ok){alert(await res.text());return;}
+   dfClose("df-folder-modal");
+   dfRefresh();
+ };
+
+ window.dfDelete=async function(path){
+   if(!confirm("Delete "+fileName(path)+"?"))return;
+   const res=await api("/files?path="+encodeURIComponent(path),{method:"DELETE"});
+   if(!res.ok){alert(await res.text());return;}
+   dfRefresh();
+ };
+
+ window.dfRename=async function(path){
+   const name=prompt("New name:",fileName(path));
+   if(!name || name===fileName(path))return;
+
+   const oldPath=path;
+   const newPath=join(parentPath(path),name);
+
+   const res=await api("/rename",{
+     method:"POST",
+     headers:{"Content-Type":"application/json"},
+     body:JSON.stringify({old_path:oldPath,new_path:newPath})
+   });
+
+   if(!res.ok){alert(await res.text());return;}
+   dfRefresh();
+ };
+
+ window.dfEdit=async function(path){
+   const res=await api("/file?path="+encodeURIComponent(path));
+   if(!res.ok){alert(await res.text());return;}
+
+   document.getElementById("df-editor").value=await res.text();
+   document.getElementById("df-editor-title").textContent="Edit "+fileName(path);
+   editingPath=path;
+   document.getElementById("df-editor-modal").classList.add("show");
+ };
+
+ window.dfSave=async function(){
+   const data=document.getElementById("df-editor").value;
+
+   const res=await api("/file?path="+encodeURIComponent(editingPath),{
+     method:"PUT",
+     headers:{"Content-Type":"text/plain"},
+     body:data
+   });
+
+   if(!res.ok){alert(await res.text());return;}
+   dfClose("df-editor-modal");
+ };
+
+ window.dfDownload=function(path){
+   window.location.href="/api/servers/"+encodeURIComponent(serverUUID)+
+     "/download?path="+encodeURIComponent(path);
+ };
+
+ window.dfUpload=async function(input){
+   const files=Array.from(input.files || []);
+   for(const file of files){
+     const path=join(currentPath,file.name);
+     const data=await file.arrayBuffer();
+
+     const res=await api("/file?path="+encodeURIComponent(path),{
+       method:"PUT",
+       headers:{"Content-Type":file.type || "application/octet-stream"},
+       body:data
+     });
+
+     if(!res.ok){
+       alert("Failed to upload "+file.name+": "+await res.text());
+       break;
+     }
+   }
+
+   input.value="";
+   dfRefresh();
+ };
+
+ dfOpen("");
+})();
+</script>
+
+</body>
+</html>
