@@ -1,0 +1,22 @@
+# Binaries
+dinex-agent
+dinex-panel
+agent/dinex-agent
+panel/dinex-panel
+
+# Runtime data
+data/
+panel/data/
+
+# Backups
+*.bak
+panel.backup-*/
+backup-before-dinex-update-*/
+
+# Local environment/secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
