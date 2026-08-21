@@ -1,8 +1,5 @@
 # Binaries
-dinex-agent
-dinex-panel
-agent/dinex-agent
-panel/dinex-panel
+# BINARIES ARE REQUIRED
 
 # Runtime data
 data/
