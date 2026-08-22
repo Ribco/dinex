@@ -89,7 +89,7 @@ func (a *ServerAPI) Page(w http.ResponseWriter, r *http.Request) {
 
 		userID, ok := a.Auth.UserFromRequest(r)
 		if !ok {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"401": "The required headers for Panel were not found on this request."})
 			return
 		}
 
@@ -476,4 +476,10 @@ func (a *ServerAPI) JSON(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(result)
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
 }

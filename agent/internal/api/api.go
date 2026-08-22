@@ -334,8 +334,9 @@ func (s *Server) auth(next http.Handler) http.Handler {
 		if token == "" || token != s.cfg.AuthToken {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{
 				"error":   401,
-				"message": "The required headers for Agent wasn't found on this request.",
+				"message": "The required headers for Agent weren't found on this request.",
 			})
+
 			return
 		}
 
