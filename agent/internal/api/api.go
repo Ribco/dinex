@@ -178,12 +178,19 @@ func (s *Server) server(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if err := s.mgr.UpdateServer(id, payload.Name, payload.Startup, payload.Directory); err != nil {
+		if err := s.mgr.UpdateServer(
+			id,
+			payload.Name,
+			payload.Startup,
+			payload.Directory,
+		); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status": "ok",
+		})
 		return
 	}
 
@@ -204,7 +211,9 @@ func (s *Server) server(w http.ResponseWriter, r *http.Request) {
 	if len(parts) == 2 && parts[1] == "file" && r.Method == http.MethodPut {
 		path := r.URL.Query().Get("path")
 
-		data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 50<<20))
+		data, err := io.ReadAll(
+			http.MaxBytesReader(w, r.Body, 50<<20),
+		)
 		if err != nil {
 			http.Error(w, "failed to read file", http.StatusBadRequest)
 			return
@@ -215,7 +224,9 @@ func (s *Server) server(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status": "ok",
+		})
 		return
 	}
 
@@ -227,7 +238,9 @@ func (s *Server) server(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		writeJSON(w, http.StatusCreated, map[string]string{"status": "ok"})
+		writeJSON(w, http.StatusCreated, map[string]string{
+			"status": "ok",
+		})
 		return
 	}
 
@@ -239,7 +252,9 @@ func (s *Server) server(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status": "ok",
+		})
 		return
 	}
 
@@ -254,12 +269,18 @@ func (s *Server) server(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if err := s.mgr.RenameFile(id, payload.OldPath, payload.NewPath); err != nil {
+		if err := s.mgr.RenameFile(
+			id,
+			payload.OldPath,
+			payload.NewPath,
+		); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status": "ok",
+		})
 		return
 	}
 
@@ -289,6 +310,7 @@ func (s *Server) server(w http.ResponseWriter, r *http.Request) {
 
 	http.NotFound(w, r)
 }
+
 func (s *Server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {
@@ -297,11 +319,10 @@ func (s *Server) auth(next http.Handler) http.Handler {
 		}
 
 		if s.cfg.AuthToken == "" {
-			http.Error(
-				w,
-				"agent authentication is not configured",
-				http.StatusUnauthorized,
-			)
+			writeJSON(w, http.StatusUnauthorized, map[string]any{
+				"error":   401,
+				"message": "The required headers for Agent wasn't found on this request.",
+			})
 			return
 		}
 
@@ -310,8 +331,11 @@ func (s *Server) auth(next http.Handler) http.Handler {
 			"Bearer ",
 		)
 
-		if token != s.cfg.AuthToken {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		if token == "" || token != s.cfg.AuthToken {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{
+				"error":   401,
+				"message": "The required headers for Agent wasn't found on this request.",
+			})
 			return
 		}
 
