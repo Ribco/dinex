@@ -1,5 +1,7 @@
 # Dinex
 
+|| OPEN SOURCE, FEEL FREE TO EDIT FILES BUT REMAIN DINEX TEXTS FOR CREDITS. ||
+
 Dinex is a lightweight, self-hostable server management platform built with Go.
 ## ✨ Features
 
