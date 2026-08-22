@@ -95,6 +95,16 @@ func (a *ServerAPI) Page(w http.ResponseWriter, r *http.Request) {
 
 		env := map[string]string{}
 
+		node, err := a.Nodes.Get(nodeID)
+		if err != nil {
+			http.Error(w, "node not found", http.StatusBadRequest)
+			return
+		}
+		if !a.Nodes.Check(node).Online {
+			http.Error(w, "Panel cannot communicate with Agent. Contact Node Maintainer.", http.StatusBadGateway)
+			return
+		}
+
 		if err := a.Servers.Create(
 			userID,
 			nodeID,
