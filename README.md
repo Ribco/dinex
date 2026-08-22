@@ -29,6 +29,8 @@ Dinex is a lightweight, self-hostable server management platform built with Go.
 ### Termux
 
     curl -fsSL https://raw.githubusercontent.com/Ribco/dinex/main/termux.sh | bash
+## Create an Admin Account
+``./dinex-panel admin:create -username YOUR_USER -password 'YOUR_PASSWORD'``
 ## 📥 Releases
 
 The latest prebuilt binaries are available on the GitHub Releases page.
