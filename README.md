@@ -101,3 +101,7 @@ Before submitting a change:
 If you find Dinex useful, consider giving the repository a ⭐ on GitHub.
 
 **GitHub:** https://github.com/Ribco/dinex
+
+## 🦖 Dinex Support/Discord
+You may get support & give us a suggestion & chat with us at:
+**Discord**: https://discord.gg/E3EyuzxX94
