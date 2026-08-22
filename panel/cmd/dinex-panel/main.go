@@ -348,7 +348,7 @@ func (a *App) login(
 		"panel/web/templates/login.html",
 	)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		http.Error(w, "Dinex Panel received an error. There was a problem making this UI. Visit Browser Console for more.", 500)
 		return
 	}
 
@@ -406,7 +406,7 @@ func (a *App) dashboard(
 		"panel/web/templates/dashboard.html",
 	)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Dinex Panel received an error. There was a problem making this UI. Visit Browser Console for more.", http.StatusInternalServerError)
 		return
 	}
 
