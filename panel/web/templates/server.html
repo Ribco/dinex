@@ -487,7 +487,8 @@ Running
 <div class="console">
 
 <div class="console-head">
-console
+<span>console</span>
+<button type="button" id="clear-console">Clear Console</button>
 </div>
 
 <div class="terminal">
@@ -965,6 +966,8 @@ window.dfRefresh=()=>dfOpen(currentPath);
  const forms=document.querySelectorAll(".power-form");
  const serverUUID="{{.Server.UUID}}";
  let lastLogs=0;
+ const clearConsole=document.getElementById("clear-console");
+ if(clearConsole){clearConsole.addEventListener("click",()=>{terminal.innerHTML="<span class=\"prompt\">container@dinex~</span> Console cleared.";});}
 
  function print(msg,error){
    if(!terminal)return;
