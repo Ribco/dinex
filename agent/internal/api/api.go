@@ -119,6 +119,32 @@ func (s *Server) server(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(parts) == 2 && parts[1] == "install-packages" && r.Method == http.MethodPost {
+		var payload struct {
+			Packages []string `json:"packages"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+
+		output, err := s.mgr.InstallNodePackages(id, payload.Packages)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error":  err.Error(),
+				"output": string(output),
+			})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status": "ok",
+			"output": string(output),
+		})
+		return
+	}
+
 	if len(parts) == 2 && r.Method == http.MethodPost {
 		var err error
 

@@ -195,6 +195,36 @@ VALUES (?, ?, ?, ?, ?, ?)
 	return err
 }
 
+func (m *Manager) InstallNodePackages(server Server, packages []string) ([]byte, error) {
+	node, err := m.Nodes.Get(server.NodeID)
+	if err != nil {
+		return nil, errors.New("node not found")
+	}
+
+	body, err := json.Marshal(map[string]any{"packages": packages})
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := m.request(
+		node,
+		http.MethodPost,
+		"/api/v1/servers/"+server.ExternalID+"/install-packages",
+		body,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return data, fmt.Errorf("agent returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+
+	return data, nil
+}
+
 func (m *Manager) UpdateSettings(
 	server Server,
 	name, externalID, description, startup, directory string,
@@ -518,6 +548,10 @@ func (m *Manager) DownloadFile(server Server, path string) ([]byte, int, string,
 	}
 
 	return data, resp.StatusCode, resp.Header.Get("Content-Type"), nil
+}
+
+func (m *Manager) RequestNode(node *nodes.Node, method, path string, body []byte) (*http.Response, error) {
+	return m.request(node, method, path, body)
 }
 
 func (m *Manager) request(

@@ -216,6 +216,25 @@ type FileEntry struct {
 	ModTime string `json:"mod_time"`
 }
 
+func (m *Manager) InstallNodePackages(id string, packages []string) ([]byte, error) {
+	server, ok := m.Get(id)
+	if !ok {
+		return nil, errors.New("server not found")
+	}
+	if len(packages) == 0 {
+		return nil, fmt.Errorf("no packages specified")
+	}
+	for _, pkg := range packages {
+		if strings.TrimSpace(pkg) == "" {
+			return nil, fmt.Errorf("invalid package name")
+		}
+	}
+	args := append([]string{"install"}, packages...)
+	cmd := exec.Command("npm", args...)
+	cmd.Dir = server.Directory
+	return cmd.CombinedOutput()
+}
+
 func (m *Manager) serverPath(id, requested string) (string, error) {
 	server, ok := m.Get(id)
 	if !ok {

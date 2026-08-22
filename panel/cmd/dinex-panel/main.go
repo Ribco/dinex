@@ -301,6 +301,10 @@ func serve() {
 					serverAPI.SettingsAPI(w, r)
 					return
 				}
+				if len(parts) >= 2 && parts[1] == "install-packages" {
+					serverAPI.InstallNodePackagesAPI(w, r)
+					return
+				}
 				if len(parts) >= 2 && (parts[1] == "files" || parts[1] == "rename") {
 					serverAPI.FilesAPI(w, r)
 					return

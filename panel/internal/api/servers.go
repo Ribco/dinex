@@ -204,6 +204,56 @@ func (a *ServerAPI) ServerPage(w http.ResponseWriter, r *http.Request) {
 	_ = tmpl.Execute(w, data)
 }
 
+func (a *ServerAPI) InstallNodePackagesAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	uuid := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/servers/"), "/install-packages")
+	server, err := a.Servers.GetByUUID(uuid)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	var payload struct {
+		Packages []string `json:"packages"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON"})
+		return
+	}
+
+	node, err := a.Nodes.Get(server.NodeID)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": "node not found"})
+		return
+	}
+
+	body, err := json.Marshal(map[string]any{"packages": payload.Packages})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+
+	resp, err := a.Servers.RequestNode(node, http.MethodPost, "/api/v1/servers/"+server.ExternalID+"/install-packages", body)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": "agent returned invalid JSON"})
+		return
+	}
+
+	result["ok"] = resp.StatusCode >= 200 && resp.StatusCode < 300
+	writeJSON(w, resp.StatusCode, result)
+}
+
 func (a *ServerAPI) SettingsAPI(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
